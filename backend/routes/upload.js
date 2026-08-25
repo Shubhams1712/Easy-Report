@@ -49,13 +49,20 @@ function cleanupFile(filePath) {
   }
 }
 
+// Helper: format file size
+function formatFileSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 /**
  * POST /api/upload
  *
- * Pipeline: Upload file → OCR/Extract text → Return extracted text + AI simplified report
+ * Pipeline: Upload file → OCR/Extract text → AI Analysis → ReportAnalysis JSON
  *
  * Request:  multipart/form-data with field "file" (PDF, PNG, JPG, WEBP)
- * Response: Extracted text + structured report from AI service
+ * Response: ReportAnalysis object matching the frontend's expected schema
  */
 router.post("/upload", upload.single("file"), async (req, res, next) => {
   let filePath = null;
@@ -70,7 +77,10 @@ router.post("/upload", upload.single("file"), async (req, res, next) => {
     }
 
     filePath = req.file.path;
-    console.log(`[UPLOAD] Received: ${req.file.originalname} (${req.file.mimetype}, ${(req.file.size / 1024).toFixed(1)}KB)`);
+    const fileName = req.file.originalname;
+    const fileSize = formatFileSize(req.file.size);
+
+    console.log(`[UPLOAD] Received: ${fileName} (${req.file.mimetype}, ${fileSize})`);
 
     // ── Step 1: OCR / Text Extraction ──
     console.log("[PIPELINE] Step 1: Extracting text...");
@@ -86,28 +96,15 @@ router.post("/upload", upload.single("file"), async (req, res, next) => {
 
     console.log(`[PIPELINE] Step 1 complete: ${extractedText.length} characters extracted`);
 
-    // ── Step 2: AI Simplification (calls aiSimplifier service) ──
+    // ── Step 2: AI Analysis → ReportAnalysis format ──
     console.log("[PIPELINE] Step 2: AI analysis & simplification...");
-    const structuredReport = await simplifyReport(extractedText);
-    console.log("[PIPELINE] Step 2 complete: Structured report generated");
+    const reportAnalysis = await simplifyReport(extractedText, fileName, fileSize);
+    console.log("[PIPELINE] Step 2 complete");
 
-    // ── Step 3: Return response ──
+    // ── Step 3: Return ReportAnalysis ──
     return res.json({
       success: true,
-      data: {
-        originalFileName: req.file.originalname,
-        fileType: req.file.mimetype,
-        extractedTextLength: extractedText.length,
-        extractedText: extractedText,
-        report: {
-          reportSummary: structuredReport.reportSummary,
-          importantFindings: structuredReport.importantFindings,
-          medicalTermsExplained: structuredReport.medicalTermsExplained,
-          measurementsAndValues: structuredReport.measurementsAndValues,
-          simpleMeaning: structuredReport.simpleMeaning,
-          doctorQuestions: structuredReport.doctorQuestions,
-        },
-      },
+      data: reportAnalysis,
     });
   } catch (err) {
     next(err);
@@ -119,16 +116,13 @@ router.post("/upload", upload.single("file"), async (req, res, next) => {
 /**
  * POST /api/simplify
  *
- * Standalone endpoint for AI team integration.
- * Accepts raw text → passes to AI service → returns structured report.
- *
- * This allows the AI team member to test their integration independently
- * without needing to upload a file each time.
+ * Standalone text simplification endpoint.
+ * Accepts raw text → returns ReportAnalysis.
  *
  * Request body (JSON):
  *   { "text": "raw extracted text from medical report..." }
  *
- * Response: Structured report JSON (same schema as /api/upload response)
+ * Response: { success: true, data: ReportAnalysis }
  */
 router.post("/simplify", async (req, res, next) => {
   try {
@@ -144,20 +138,11 @@ router.post("/simplify", async (req, res, next) => {
 
     console.log(`[SIMPLIFY] Received ${text.length} characters of text`);
 
-    const structuredReport = await simplifyReport(text);
+    const reportAnalysis = await simplifyReport(text);
 
     return res.json({
       success: true,
-      data: {
-        report: {
-          reportSummary: structuredReport.reportSummary,
-          importantFindings: structuredReport.importantFindings,
-          medicalTermsExplained: structuredReport.medicalTermsExplained,
-          measurementsAndValues: structuredReport.measurementsAndValues,
-          simpleMeaning: structuredReport.simpleMeaning,
-          doctorQuestions: structuredReport.doctorQuestions,
-        },
-      },
+      data: reportAnalysis,
     });
   } catch (err) {
     next(err);
@@ -167,13 +152,10 @@ router.post("/simplify", async (req, res, next) => {
 /**
  * POST /api/download
  *
- * Generate and download a PDF summary from a structured report.
+ * Generate and download a PDF summary from a ReportAnalysis object.
  *
  * Request body (JSON):
- *   {
- *     "report": { ...structured report object... },
- *     "originalFileName": "blood-test.pdf"
- *   }
+ *   { "report": ReportAnalysis, "originalFileName": "blood-test.pdf" }
  *
  * Response: PDF file download
  */
@@ -184,7 +166,7 @@ router.post("/download", async (req, res, next) => {
     if (!report) {
       return res.status(400).json({
         success: false,
-        error: "Missing 'report' in request body. Send the report object from the /api/upload response.",
+        error: "Missing 'report' in request body. Send the ReportAnalysis object from the /api/upload response.",
         errorCode: "MISSING_REPORT",
       });
     }
