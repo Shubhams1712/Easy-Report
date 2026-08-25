@@ -1,5 +1,9 @@
+import { GoogleGenAI } from '@google/genai';
 import { Finding, ReportAnalysis } from '../types';
 import { SAMPLE_REPORTS } from '../data/sampleReports';
+import { extractTextFromFile } from './ocrService';
+import { SYSTEM_PROMPT, GEMINI_MODEL } from './aiPrompt';
+import type { AiAnalysisResponse } from './aiTypes';
 
 export interface MedicalGlossaryEntry {
   term: string;
@@ -12,7 +16,7 @@ export const MEDICAL_GLOSSARY: Record<string, MedicalGlossaryEntry> = {
   glucose: {
     term: 'Glucose',
     category: 'Metabolic & Energy',
-    simpleDefinition: 'The main type of sugar in your blood and your body’s primary energy source.',
+    simpleDefinition: 'The main type of sugar in your blood and your body\'s primary energy source.',
     whyItMatters: 'Consistently high fasting glucose indicates diabetes or pre-diabetes, while too low causes shakiness and dizziness.',
   },
   bun: {
@@ -65,68 +69,158 @@ export const MEDICAL_GLOSSARY: Record<string, MedicalGlossaryEntry> = {
   },
 };
 
-/**
- * Intelligent client-side parser & AI synthesizer for medical reports
- */
+function getGeminiClient(): GoogleGenAI | null {
+  const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+  if (!apiKey) return null;
+  return new GoogleGenAI({ apiKey });
+}
+
+function mapAiStatus(
+  aiStatus: AiAnalysisResponse['keyFindings'][number]['status']
+): Finding['status'] {
+  const map: Record<string, Finding['status']> = {
+    normal: 'normal',
+    low: 'low',
+    high: 'high',
+    slightly_low: 'slightly_low',
+    slightly_high: 'slightly_high',
+    critical: 'critical',
+  };
+  return map[aiStatus] || 'info';
+}
+
+function mapAiToReportAnalysis(
+  ai: AiAnalysisResponse,
+  fileName: string,
+  rawText: string
+): ReportAnalysis {
+  const findings: Finding[] = ai.keyFindings.map((f, i) => ({
+    id: `finding-${i}`,
+    name: f.name,
+    value: f.value,
+    referenceRange: f.referenceRange,
+    status: mapAiStatus(f.status),
+    statusLabel: f.status.charAt(0).toUpperCase() + f.status.slice(1).replace('_', ' '),
+    explanation: f.explanation,
+    clinicalMeaning: f.clinicalSignificance,
+  }));
+
+  const category = rawText.toLowerCase().includes('thyroid')
+    ? 'blood'
+    : rawText.toLowerCase().includes('cbc')
+    ? 'blood'
+    : 'general';
+
+  return {
+    fileName,
+    dateProcessed: new Date().toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    }),
+    patientName: ai.patientName || undefined,
+    dateOfCollection: ai.dateOfCollection || undefined,
+    testType: ai.testType,
+    glanceSummary: ai.glanceSummary,
+    keyFindings: findings,
+    whatThisMeans: ai.importantNotes.join(' '),
+    doctorQuestions: ai.questionsForDoctor,
+    rawText,
+    category,
+  };
+}
+
+function parseAiJsonResponse(text: string): AiAnalysisResponse {
+  let cleaned = text.trim();
+
+  // Strip markdown code fences if present
+  if (cleaned.startsWith('```json')) {
+    cleaned = cleaned.slice(7);
+  } else if (cleaned.startsWith('```')) {
+    cleaned = cleaned.slice(3);
+  }
+  if (cleaned.endsWith('```')) {
+    cleaned = cleaned.slice(0, -3);
+  }
+  cleaned = cleaned.trim();
+
+  return JSON.parse(cleaned) as AiAnalysisResponse;
+}
+
 export async function analyzeMedicalDocument(
   file: File | null,
   rawTextOverride?: string,
   onProgress?: (stage: string) => void
 ): Promise<ReportAnalysis> {
-  // Step 1: Ingestion
-  onProgress?.('Uploading and processing document in-memory...');
-  await new Promise((r) => setTimeout(r, 650));
-
-  let extractedText = rawTextOverride || '';
   const fileName = file?.name || 'medical_report.pdf';
-  const fileSize = file ? `${(file.size / (1024 * 1024)).toFixed(1)} MB` : '1.5 MB';
 
-  // If a real file is passed, read its text
-  if (file && !extractedText) {
-    if (file.type === 'text/plain' || file.name.endsWith('.txt')) {
-      extractedText = await file.text();
-    } else {
-      // For images or PDFs, attempt to read or generate representation
-      try {
-        const textFromBlob = await file.text();
-        if (textFromBlob.length > 50 && !textFromBlob.includes('\0')) {
-          extractedText = textFromBlob;
-        }
-      } catch {
-        // Fallback to sample representation
-      }
+  // Step 1: Get text via OCR or override
+  let extractedText = rawTextOverride || '';
+
+  if (!extractedText && file) {
+    try {
+      const ocrResult = await extractTextFromFile(file, onProgress);
+      extractedText = ocrResult.text;
+    } catch (ocrErr) {
+      console.warn('OCR failed, falling back to sample:', ocrErr);
     }
   }
 
-  // If no text was extracted (e.g. dummy binary), provide realistic extraction matching the filename
+  // Fallback: match filename to sample reports
   if (!extractedText || extractedText.trim().length === 0) {
-    if (fileName.toLowerCase().includes('cbc') || fileName.toLowerCase().includes('blood_count')) {
+    onProgress?.('Using sample report for demonstration...');
+    const lower = fileName.toLowerCase();
+    if (lower.includes('cbc') || lower.includes('blood_count')) {
       extractedText = SAMPLE_REPORTS[1].rawText;
-    } else if (fileName.toLowerCase().includes('thyroid') || fileName.toLowerCase().includes('tsh')) {
+    } else if (lower.includes('thyroid') || lower.includes('tsh')) {
       extractedText = SAMPLE_REPORTS[2].rawText;
     } else {
       extractedText = SAMPLE_REPORTS[0].rawText;
     }
   }
 
-  // Step 2: Extraction
-  onProgress?.('Extracting clinical markers, values, and reference ranges...');
-  await new Promise((r) => setTimeout(r, 800));
+  // Step 2: Try Gemini AI
+  const client = getGeminiClient();
+  if (client) {
+    try {
+      onProgress?.('Sending extracted text to Gemini AI for analysis...');
+      const response = await client.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: `Here is the extracted text from a medical report:\n\n${extractedText}\n\nPlease analyze this report and return the structured JSON response as specified in the system instructions.` }],
+          },
+        ],
+        config: {
+          systemInstruction: SYSTEM_PROMPT,
+          responseMimeType: 'application/json',
+          temperature: 0.2,
+        },
+      });
 
-  // Step 3: Medical Simplification Engine
-  onProgress?.('Translating clinical terminology into patient-friendly language...');
-  await new Promise((r) => setTimeout(r, 900));
+      const responseText = response.text;
+      if (!responseText) throw new Error('Empty response from Gemini');
 
-  // Step 4: Next-step synthesis
-  onProgress?.('Synthesizing actionable doctor questions and takeaways...');
-  await new Promise((r) => setTimeout(r, 650));
+      onProgress?.('Parsing structured analysis...');
+      const aiResult = parseAiJsonResponse(responseText);
+      return mapAiToReportAnalysis(aiResult, fileName, extractedText);
+    } catch (aiErr) {
+      console.warn('Gemini AI analysis failed, falling back to rule-based:', aiErr);
+      onProgress?.('AI analysis unavailable, using fallback analysis...');
+    }
+  } else {
+    onProgress?.('No API key configured, using local analysis...');
+  }
 
-  // Parse lines to detect findings
+  // Step 3: Fallback - rule-based extraction (same as before)
+  return ruleBasedAnalysis(extractedText, fileName);
+}
+
+function ruleBasedAnalysis(extractedText: string, fileName: string): ReportAnalysis {
+  const lower = extractedText.toLowerCase();
   const lines = extractedText.split('\n');
   const findings: Finding[] = [];
-
-  // Detect specific markers in text
-  const lower = extractedText.toLowerCase();
 
   if (lower.includes('glucose')) {
     const match = extractedText.match(/glucose\s+(\d+)/i);
@@ -223,7 +317,6 @@ export async function analyzeMedicalDocument(
     });
   }
 
-  // If no specific markers detected, provide generalized structured extraction
   if (findings.length === 0) {
     findings.push(
       {
@@ -249,33 +342,27 @@ export async function analyzeMedicalDocument(
 
   const hasAbnormal = findings.some((f) => f.status !== 'normal' && f.status !== 'info');
 
-  const glanceSummary = hasAbnormal
-    ? 'Your recent blood work indicates overall good health, with most markers falling within the expected ranges. However, there is one area that requires slight attention.'
-    : 'Your recent test results are remarkably consistent with healthy reference ranges, showing stable organ function and balanced metabolic parameters.';
-
-  const whatThisMeans = hasAbnormal
-    ? "You don't need to make any drastic changes based on these results. To address the slightly low Vitamin D or borderline markers, consider discussing a mild supplement with your primary care provider, or safely increasing your sun exposure."
-    : 'All primary markers fall within standard normal ranges. You can maintain your existing healthy dietary habits, regular physical activity, and scheduled annual visits.';
-
-  const doctorQuestions = [
-    'Are there any lifestyle or dietary adjustments you would recommend based on these findings?',
-    'Should we schedule any repeat testing in 6–12 months to monitor long-term trends?',
-    'Do you recommend any specific over-the-counter supplements or preventative measures?',
-  ];
-
   return {
     fileName,
-    fileSize,
+    fileSize: 'N/A',
     dateProcessed: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
     testType: lower.includes('thyroid')
       ? 'Thyroid Function Profile'
       : lower.includes('cbc')
       ? 'Complete Blood Count (CBC)'
       : 'Comprehensive Metabolic Panel & Lipid Panel',
-    glanceSummary,
+    glanceSummary: hasAbnormal
+      ? 'Your recent blood work indicates overall good health, with most markers falling within the expected ranges. However, there is one area that requires slight attention.'
+      : 'Your recent test results are remarkably consistent with healthy reference ranges, showing stable organ function and balanced metabolic parameters.',
     keyFindings: findings,
-    whatThisMeans,
-    doctorQuestions,
+    whatThisMeans: hasAbnormal
+      ? "You don't need to make any drastic changes based on these results. To address the slightly low Vitamin D or borderline markers, consider discussing a mild supplement with your primary care provider, or safely increasing your sun exposure."
+      : 'All primary markers fall within standard normal ranges. You can maintain your existing healthy dietary habits, regular physical activity, and scheduled annual visits.',
+    doctorQuestions: [
+      'Are there any lifestyle or dietary adjustments you would recommend based on these findings?',
+      'Should we schedule any repeat testing in 6-12 months to monitor long-term trends?',
+      'Do you recommend any specific over-the-counter supplements or preventative measures?',
+    ],
     rawText: extractedText,
     category: lower.includes('thyroid') || lower.includes('metabolic') || lower.includes('blood') ? 'blood' : 'general',
   };
