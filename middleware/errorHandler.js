@@ -41,8 +41,17 @@ function errorHandler(err, req, res, _next) {
     });
   }
 
-  // ── AI service errors (for when AI team connects their service) ──
-  if (err.code === "AI_FAILURE" || err.code === "AI_CONFIG_ERROR" || err.code === "AI_PARSE_ERROR" || err.code === "AI_EMPTY_RESPONSE") {
+  // ── AI configuration error (bad/missing API key) ──
+  if (err.code === "AI_CONFIG_ERROR") {
+    return res.status(503).json({
+      success: false,
+      error: "AI service is not configured correctly. Please check the API key.",
+      errorCode: "AI_CONFIG_ERROR",
+    });
+  }
+
+  // ── AI service errors ──
+  if (err.code === "AI_FAILURE" || err.code === "AI_PARSE_ERROR" || err.code === "AI_EMPTY_RESPONSE") {
     return res.status(502).json({
       success: false,
       error: `AI service error: ${err.message}`,

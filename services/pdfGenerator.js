@@ -1,8 +1,10 @@
 const PDFDocument = require("pdfkit");
 
 /**
- * Generate a downloadable PDF summary from a structured report.
- * @param {object} report - The structured report object from the AI.
+ * Generate a downloadable PDF summary from a ReportAnalysis object.
+ * Uses the frontend's exact schema: glanceSummary, keyFindings, whatThisMeans, doctorQuestions.
+ *
+ * @param {object} report - The ReportAnalysis object.
  * @param {string} originalFileName - Original uploaded file name.
  * @returns {Promise<Buffer>} The PDF as a Buffer.
  */
@@ -20,7 +22,6 @@ function generatePDF(report, originalFileName) {
         primary: "#1a73e8",
         heading: "#202124",
         body: "#3c4043",
-        accent: "#e8f0fe",
         critical: "#d93025",
         warning: "#f9ab00",
         normal: "#1e8e3e",
@@ -28,29 +29,29 @@ function generatePDF(report, originalFileName) {
       };
 
       // ── Header ──
-      doc
-        .rect(0, 0, doc.page.width, 80)
-        .fill(colors.primary);
+      doc.rect(0, 0, doc.page.width, 85).fill(colors.primary);
 
       doc
         .font("Helvetica-Bold")
         .fontSize(22)
         .fillColor("#ffffff")
-        .text("Medical Report Summary", 50, 25);
+        .text("Medical Report Summary", 50, 20);
 
       doc
         .font("Helvetica")
         .fontSize(10)
         .fillColor("#e8f0fe")
-        .text(`Source: ${originalFileName}  |  Generated: ${new Date().toLocaleDateString()}`, 50, 52);
+        .text(`Source: ${originalFileName}`, 50, 48);
+
+      doc
+        .text(`Test Type: ${report.testType || "Medical Report"}  |  Date: ${report.dateProcessed || new Date().toLocaleDateString()}`, 50, 62);
 
       doc.moveDown(2);
-      let y = 100;
+      let y = 105;
 
-      // ── Helper functions ──
+      // ── Helpers ──
       function sectionTitle(title) {
-        y = doc.y;
-        if (y > 700) { doc.addPage(); y = 50; }
+        if (doc.y > 700) doc.addPage();
         doc
           .font("Helvetica-Bold")
           .fontSize(14)
@@ -65,7 +66,7 @@ function generatePDF(report, originalFileName) {
       }
 
       function bodyText(text) {
-        if (doc.y > 720) { doc.addPage(); }
+        if (doc.y > 720) doc.addPage();
         doc
           .font("Helvetica")
           .fontSize(10)
@@ -75,117 +76,106 @@ function generatePDF(report, originalFileName) {
       }
 
       function bulletPoint(text) {
-        if (doc.y > 720) { doc.addPage(); }
+        if (doc.y > 720) doc.addPage();
         doc
           .font("Helvetica")
           .fontSize(10)
           .fillColor(colors.body)
-          .text(`•  ${text}`, 60, doc.y, { width: 485, lineGap: 3 });
+          .text(`  -  ${text}`, 55, doc.y, { width: 490, lineGap: 3 });
         doc.moveDown(0.3);
       }
 
       function statusColor(status) {
         const s = (status || "").toLowerCase();
         if (s === "critical") return colors.critical;
-        if (s === "high" || s === "low" || s === "abnormal") return colors.warning;
+        if (s === "high" || s === "low" || s === "slightly_high" || s === "slightly_low" || s === "abnormal") return colors.warning;
         return colors.normal;
       }
 
-      // ── 1. Report Summary ──
-      sectionTitle("REPORT SUMMARY");
-      bodyText(report.reportSummary || "No summary available.");
+      // ── 1. At-a-Glance Summary ──
+      sectionTitle("AT-A-GLANCE SUMMARY");
+      bodyText(report.glanceSummary || "No summary available.");
 
-      // ── 2. Important Findings ──
-      if (report.importantFindings && report.importantFindings.length > 0) {
-        sectionTitle("IMPORTANT FINDINGS");
-        for (const finding of report.importantFindings) {
-          if (doc.y > 710) { doc.addPage(); }
+      // ── 2. Key Findings ──
+      if (report.keyFindings && report.keyFindings.length > 0) {
+        sectionTitle("KEY FINDINGS");
+
+        for (const f of report.keyFindings) {
+          if (doc.y > 700) doc.addPage();
+
+          // Finding header with status badge
           doc
             .font("Helvetica-Bold")
             .fontSize(10)
-            .fillColor(statusColor(finding.status))
-            .text(`[${(finding.status || "info").toUpperCase()}]`, 60, doc.y, { continued: true })
+            .fillColor(statusColor(f.status))
+            .text(`[${(f.statusLabel || f.status || "NORMAL").toUpperCase()}]`, 55, doc.y, { continued: true })
             .fillColor(colors.heading)
-            .text(`  ${finding.finding}`);
-          doc
-            .font("Helvetica")
-            .fontSize(9)
-            .fillColor(colors.body)
-            .text(finding.detail, 75, doc.y, { width: 470, lineGap: 2 });
+            .text(`  ${f.name || "Test"}`);
+
+          // Value and reference
+          if (f.value) {
+            doc
+              .font("Helvetica")
+              .fontSize(9)
+              .fillColor(colors.body)
+              .text(`Value: ${f.value}${f.referenceRange ? `  |  Reference: ${f.referenceRange}` : ""}`, 70, doc.y, { width: 475 });
+          }
+
+          // Explanation
+          if (f.explanation) {
+            doc
+              .font("Helvetica")
+              .fontSize(9)
+              .fillColor(colors.body)
+              .text(f.explanation, 70, doc.y, { width: 475, lineGap: 2 });
+          }
+
+          // Clinical meaning
+          if (f.clinicalMeaning) {
+            doc
+              .font("Helvetica-Oblique")
+              .fontSize(9)
+              .fillColor("#5f6368")
+              .text(f.clinicalMeaning, 70, doc.y, { width: 475, lineGap: 2 });
+          }
+
           doc.moveDown(0.5);
         }
       }
 
-      // ── 3. Medical Terms Explained ──
-      if (report.medicalTermsExplained && report.medicalTermsExplained.length > 0) {
+      // ── 3. Medical Terms ──
+      if (report.medicalTerms && report.medicalTerms.length > 0) {
         sectionTitle("MEDICAL TERMS EXPLAINED");
-        for (const term of report.medicalTermsExplained) {
-          if (doc.y > 720) { doc.addPage(); }
+        for (const t of report.medicalTerms) {
+          if (doc.y > 720) doc.addPage();
           doc
             .font("Helvetica-Bold")
             .fontSize(10)
             .fillColor(colors.heading)
-            .text(term.term, 60, doc.y, { continued: true })
+            .text(t.term, 55, doc.y, { continued: true })
             .font("Helvetica")
             .fillColor(colors.body)
-            .text(`  —  ${term.meaning}`, { width: 470 });
+            .text(`  --  ${t.simpleMeaning}`, { width: 475 });
           doc.moveDown(0.3);
         }
       }
 
-      // ── 4. Measurements & Values ──
-      if (report.measurementsAndValues && report.measurementsAndValues.length > 0) {
-        sectionTitle("MEASUREMENTS & VALUES");
+      // ── 4. What This Means ──
+      sectionTitle("WHAT THIS MEANS FOR YOU");
+      bodyText(report.whatThisMeans || "No simplified explanation available.");
 
-        // Table header
-        const tableTop = doc.y;
-        doc
-          .font("Helvetica-Bold")
-          .fontSize(9)
-          .fillColor(colors.heading);
-        doc.text("Parameter", 55, tableTop, { width: 140 });
-        doc.text("Value", 200, tableTop, { width: 90 });
-        doc.text("Reference Range", 300, tableTop, { width: 120 });
-        doc.text("Status", 430, tableTop, { width: 80 });
-        doc.moveDown(0.3);
-        doc.moveTo(50, doc.y).lineTo(545, doc.y).strokeColor(colors.divider).stroke();
-        doc.moveDown(0.3);
-
-        for (const m of report.measurementsAndValues) {
-          if (doc.y > 720) { doc.addPage(); }
-          const rowY = doc.y;
-          doc.font("Helvetica").fontSize(9).fillColor(colors.body);
-          doc.text(m.parameter || "-", 55, rowY, { width: 140 });
-          doc.text(m.value || "-", 200, rowY, { width: 90 });
-          doc.text(m.referenceRange || "-", 300, rowY, { width: 120 });
-          doc
-            .font("Helvetica-Bold")
-            .fillColor(statusColor(m.status))
-            .text((m.status || "-").toUpperCase(), 430, rowY, { width: 80 });
-          doc.moveDown(0.3);
-        }
-      }
-
-      // ── 5. What This Means ──
-      sectionTitle("WHAT THIS MEANS IN SIMPLE LANGUAGE");
-      bodyText(report.simpleMeaning || "No simplified explanation available.");
-
-      // ── 6. Questions for Your Doctor ──
+      // ── 5. Questions for Your Doctor ──
       if (report.doctorQuestions && report.doctorQuestions.length > 0) {
-        sectionTitle("QUESTIONS TO DISCUSS WITH YOUR DOCTOR");
+        sectionTitle("QUESTIONS TO ASK YOUR DOCTOR");
         for (const q of report.doctorQuestions) {
           bulletPoint(q);
         }
       }
 
-      // ── Footer / Disclaimer ──
-      if (doc.y > 680) { doc.addPage(); }
+      // ── Disclaimer ──
+      if (doc.y > 680) doc.addPage();
       doc.moveDown(1);
-      doc
-        .moveTo(50, doc.y)
-        .lineTo(545, doc.y)
-        .strokeColor(colors.divider)
-        .stroke();
+      doc.moveTo(50, doc.y).lineTo(545, doc.y).strokeColor(colors.divider).stroke();
       doc.moveDown(0.5);
       doc
         .font("Helvetica-Oblique")
