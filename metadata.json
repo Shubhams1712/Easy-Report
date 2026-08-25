@@ -1,0 +1,6 @@
+{
+  "name": "EasyReport- Medical Report Simplifier",
+  "description": "Transforms complex medical jargon, lab results, and health reports into clear, patient-friendly insights using AI with privacy-first zero-retention.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
